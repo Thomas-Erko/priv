@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Report Plotter</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--ink:#1b1f27;--mute:#6b7280;--line:#e3e6ec;--acc:#2f6fed;--acc2:#e8f0ff;--ok:#12805c;--err:#c2342b}
+@media (prefers-color-scheme:dark){:root{--bg:#12141a;--card:#1b1f27;--ink:#e8eaee;--mute:#98a0ae;--line:#2c313c;--acc:#5b8dff;--acc2:#1f2a44;--ok:#4cc79a;--err:#ff7b72}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:780px;margin:0 auto;padding:40px 20px 80px}
+h1{font-size:26px;margin:0 0 4px}
+.sub{color:var(--mute);margin:0 0 24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:16px}
+#drop{border:2px dashed var(--line);border-radius:14px;text-align:center;padding:36px 20px;transition:.15s;background:var(--card)}
+#drop.over{border-color:var(--acc);background:var(--acc2)}
+#drop .big{font-size:17px;font-weight:600}
+#drop .small{color:var(--mute);margin:4px 0 16px}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--ink);padding:8px 14px;border-radius:9px;cursor:pointer}
+button:hover{border-color:var(--acc)}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+button.primary:hover{opacity:.9}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;padding:10px 4px;border-bottom:1px solid var(--line)}
+.row:last-child{border:0}
+.row .name{flex:1 1 180px;min-width:0;word-break:break-all}
+.row .size{color:var(--mute);font-size:13px}
+.st{font-size:13px;text-align:right}
+.st a{color:var(--acc);font-weight:600;text-decoration:none}
+.st.err{color:var(--err)}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line);border-top-color:var(--acc);border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes s{to{transform:rotate(360deg)}}
+.head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.head h2{font-size:16px;margin:0}
+.opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
+label.f{display:block;font-size:13px;color:var(--mute)}
+label.f input,label.f select{display:block;width:100%;margin-top:4px;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--ink)}
+.actions{display:flex;gap:10px;margin-top:4px;flex-wrap:wrap}
+.empty{color:var(--mute);text-align:center;padding:16px}
+.hint{color:var(--mute);font-size:13px;margin-top:10px}
+</style>
+<main>
+  <h1>Report Plotter</h1>
+  <p class="sub">Drop in Excel or CSV files, pick what to plot, and get one report per file in the <code>output</code> folder.</p>
+
+  <div id="drop">
+    <div class="big">Drag files or a folder here</div>
+    <div class="small">.xlsx, .xls or .csv</div>
+    <button onclick="$('files').click()">Choose files</button>
+    <button onclick="$('folder').click()">Choose folder</button>
+    <input type="file" id="files" multiple accept=".xlsx,.xls,.csv" hidden>
+    <input type="file" id="folder" webkitdirectory multiple hidden>
+  </div>
+
+  <div class="card" id="listCard" style="margin-top:16px">
+    <div class="head">
+      <h2>Uploaded files</h2>
+      <span>
+        <button onclick="toggle(true)">Select all</button>
+        <button onclick="toggle(false)">None</button>
+        <button onclick="clearAll()">Clear</button>
+      </span>
+    </div>
+    <div id="list"></div>
+  </div>
+
+  <div class="card">
+    <div class="head"><h2>Options</h2></div>
+    <div class="opts">
+      <label class="f">Report type
+        <select id="kind"><option value="dr8">DR8 Data Distribution (PowerPoint deck)</option><option value="box">Chart report: box plots (HTML)</option><option value="hist">Chart report: histograms (HTML)</option></select>
+      </label>
+      <label class="f">Split charts by column
+        <input id="group" placeholder="Auto (PROCESS_NAME)">
+      </label>
+      <label class="f">Max charts per sheet
+        <input id="max" type="number" value="200" min="1">
+      </label>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="primary" id="goSel" onclick="gen(false)">Generate selected</button>
+    <button id="goAll" onclick="gen(true)">Generate all</button>
+  </div>
+  <p class="hint">Reports are saved to <code>output/&lt;file name&gt;/report.html</code>. Big files can take a few seconds each.</p>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const ACCEPT = /\.(xlsx|xls|csv)$/i;
+let files = [];            // [{name, size}]
+const status = {};         // name -> html
+
+function fmt(n){return n>1e6?(n/1e6).toFixed(1)+' MB':Math.max(1,Math.round(n/1e3))+' KB'}
+function esc(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+
+async function refresh(){
+  files = (await (await fetch('/files')).json()).files;
+  render();
+}
+function render(){
+  $('list').innerHTML = files.length ? files.map((f,i)=>`
+    <div class="row">
+      <input type="checkbox" data-n="${esc(f.name)}" checked>
+      <span class="name" title="${esc(f.name)}">${esc(f.name)}</span>
+      <span class="size">${fmt(f.size)}</span>
+      <span class="st" id="st${i}">${status[f.name]||''}</span>
+      <button onclick="genOne(${i})">Plot</button>
+    </div>`).join('') : '<div class="empty">Nothing uploaded yet</div>';
+}
+
+async function upload(list){
+  list = [...list].filter(f=>ACCEPT.test(f.name));
+  if(!list.length) return;
+  const fd = new FormData();
+  list.forEach(f=>fd.append('files',f,f.name));
+  $('list').innerHTML = `<div class="empty"><span class="spin"></span>Uploading ${list.length} file(s)…</div>`;
+  await fetch('/upload',{method:'POST',body:fd});
+  refresh();
+}
+$('files').onchange = e => { upload(e.target.files); e.target.value=''; };
+$('folder').onchange = e => { upload(e.target.files); e.target.value=''; };
+
+// drag & drop, including folders
+const drop = $('drop');
+['dragenter','dragover'].forEach(t=>drop.addEventListener(t,e=>{e.preventDefault();drop.classList.add('over')}));
+['dragleave','drop'].forEach(t=>drop.addEventListener(t,e=>{e.preventDefault();drop.classList.remove('over')}));
+drop.addEventListener('drop', async e=>{
+  const out=[];
+  const walk = async entry=>{
+    if(entry.isFile) out.push(await new Promise(r=>entry.file(r)));
+    else if(entry.isDirectory){
+      const rd=entry.createReader();
+      let batch;
+      do{ batch=await new Promise(r=>rd.readEntries(r)); for(const c of batch) await walk(c); }while(batch.length);
+    }
+  };
+  const items=[...e.dataTransfer.items].map(i=>i.webkitGetAsEntry&&i.webkitGetAsEntry()).filter(Boolean);
+  for(const it of items) await walk(it);
+  upload(out);
+});
+window.addEventListener('dragover',e=>e.preventDefault());
+window.addEventListener('drop',e=>e.preventDefault());
+
+function toggle(v){document.querySelectorAll('#list input').forEach(i=>i.checked=v)}
+async function clearAll(){await fetch('/clear',{method:'POST'});Object.keys(status).forEach(k=>delete status[k]);refresh()}
+
+async function run(name){
+  status[name]='<span class="spin"></span>Plotting…'; render();
+  let h;
+  try{
+    const r = await (await fetch('/generate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({files:[name],kind:$('kind').value,group:$('group').value,max:$('max').value})})).json();
+    const x = r.results[0];
+    h = x.error ? `<span class="err">Error: ${esc(x.error)}</span>` : `<a href="${x.url}" target="_blank">Open ↗</a>`;
+  }catch(err){ h='<span class="err">Failed</span>'; }
+  status[name]=h; render();
+}
+async function genOne(i){ await run(files[i].name); }
+async function gen(all){
+  const checked = new Set([...document.querySelectorAll('#list input:checked')].map(i=>i.dataset.n));
+  const names = files.map(f=>f.name).filter(n=>all||checked.has(n));
+  if(!names.length) return;
+  $('goSel').disabled=$('goAll').disabled=true;
+  for(const n of names) await run(n);
+  $('goSel').disabled=$('goAll').disabled=false;
+}
+refresh();
+</script>
+</html>
